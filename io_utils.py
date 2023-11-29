@@ -5,6 +5,9 @@ from tqdm import tqdm
 from tensorflow.io import gfile
 import json
 from more_itertools import chunked
+from pathlib import Path
+# from src.utils.logging_utils import init_logger
+# logger = init_logger()
 
 
 def pack_byte_arrays(*byte_arrays):
@@ -120,42 +123,60 @@ class MultiBytesIOReader:
 
 import time
 
-class CallbackWriter:
-    """
-    Description: A class that writes to a file descriptor and logs the progress once every `frequency` seconds
-    """
-    def __init__(self, fd, filename, frequency=300):
-        # self.logger = logger
-        self.fd = fd
-        self.filename = filename
-        self.frequency = frequency # in seconds
-        self.last_run = 0
+# class CallbackWriter:
+#     """
+#     Description: A class that writes to a file descriptor and logs the progress once every `frequency` seconds
+#     """
+#     def __init__(self, fd, filename, frequency=300):
+#         # self.logger = logger
+#         self.fd = fd
+#         self.filename = filename
+#         self.frequency = frequency # in seconds
+#         self.last_run = 0
         
-    def __call__(self, total_input, total_output, _, write_data):
-        current_time = time.time()
-        data = bytes(write_data)
-        self.fd.write(data)
-        if current_time - self.last_run > self.frequency:
-            self.last_run = current_time
-            print(f"timestamp={current_time} out_mb={total_input/(1024**2):.2f} out_c_mb={total_output/(1024**2):.2f} filename={self.filename}")
-            self.fd.flush()
-        self.total_input = total_input
-        self.total_output = total_output
+#     def __call__(self, total_input, total_output, _, write_data):
+#         current_time = time.time()
+#         data = bytes(write_data)
+#         self.fd.write(data)
+#         if current_time - self.last_run > self.frequency:
+#             self.last_run = current_time
+#             print(f"timestamp={current_time} out_mb={total_input/(1024**2):.2f} out_c_mb={total_output/(1024**2):.2f} filename={self.filename}")
+#             self.fd.flush()
+#         self.total_input = total_input
+#         self.total_output = total_output
 
+def parse_path(path_to_model):
+    path_to_model = str(Path(str(path_to_model)))
+    if path_to_model.startswith("gs:/"):
+        if not path_to_model.startswith("gs://"):
+            path_to_model = path_to_model.replace("gs:/", "gs://")
+    return path_to_model
+
+class GLOBAL_OBJECT:
+    total_output=0
+    
 def write_to_file(itr, output_path, batch_size=1,**kwargs):
+    obj = GLOBAL_OBJECT()
+    output_path = parse_path(output_path)
     itr = iter(itr)
     if batch_size>1:
         itr = chunked(itr, batch_size)
         itr = iter(map(lambda x: b'\n'.join(x)+b'\n', itr))
 
     stream = MultiBytesIOWriter(itr,**kwargs)
-    with gfile.GFile(output_path, 'wb') as f:
-        callback = CallbackWriter(f,output_path)
-        pyzstd.compress_stream(stream, None, callback=callback)
-    msg = f"Done writing into {output_path} a total of {callback.total_output/(1024**2)}MB"
-    # print(msg)
-    # if logger is not None:
-        # logger.info(msg)
+    with tqdm() as pbar:
+        with gfile.GFile(output_path, 'wb') as f:
+            def callback(total_input, total_output, _, write_data):
+                data = bytes(write_data)
+                desc = dict(out_mb=f"{total_input/(1024**2):.2f}", out_c_mb=f"{total_output/(1024**2):.2f}")
+                pbar.set_description(repr(desc))
+                pbar.update(len(data))
+                f.write(data)
+                obj.total_output = total_output
+            pyzstd.compress_stream(stream, None, callback=callback)
+    msg = f"Done writing into {output_path} a total of {obj.total_output/(1024**2):.2f}MB"
+    print(msg)
+
 
 def serialize(data_point):
     return json.dumps(data_point).encode('utf-8')
